@@ -1,0 +1,37 @@
+---
+name: pr-update-gitleaks
+on:
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - closed
+  push:
+    branches:
+      - master
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  pr-update-gitleaks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+        if: github.event_name != 'pull_request' || github.event.action != 'closed'
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - uses: actions/setup-node@v4.0.0
+        if: github.event_name != 'pull_request' || github.event.action != 'closed'
+        with:
+          cache: npm
+      - name: Install packages
+        if: github.event_name != 'pull_request' || github.event.action != 'closed'
+        run: bash "${GITHUB_WORKSPACE}/scripts/npm_ci.sh"
+      - uses: dev-hato/actions-update-gitleaks@v0.0.57
+        with:
+          github-token: ${{secrets.GITHUB_TOKEN}}
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true

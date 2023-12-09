@@ -6,251 +6,401 @@ import imghdr
 import json
 import os
 import re
+from enum import Enum, auto
 from logging import getLogger
 from tempfile import NamedTemporaryFile
-from typing import List
+from typing import List, Optional
+
+import matplotlib.pyplot as plt
+import pandas as pd
 import requests
 from git import Repo
-from git.exc import InvalidGitRepositoryError, GitCommandNotFound
+from git.exc import GitCommandNotFound, InvalidGitRepositoryError
 
 import slackbot_settings as conf
-from library.vocabularydb \
-    import get_vocabularys, add_vocabulary, show_vocabulary, delete_vocabulary, show_random_vocabulary
-from library.earthquake import generate_quake_info_for_slack, get_quake_list
-from library.hukidasi import generator
+from library.chat_gpt import chat_gpt, image_create
+from library.clientclass import BaseClient
+from library.earthquake import generate_map_img, get_quake_list
 from library.geo import get_geo_data
 from library.hatokaraage import hato_ha_karaage
-from library.clientclass import BaseClient
+from library.hukidasi import generator
+from library.jma_amedas import get_jma_amedas
 from library.jma_amesh import jma_amesh
+from library.omikuji import OmikujiResult, OmikujiResults
+from library.omikuji import draw as omikuji_draw
+from library.textlint import get_textlint_result
+from library.vocabularydb import (
+    add_vocabulary,
+    delete_vocabulary,
+    get_vocabularys,
+    show_random_vocabulary,
+    show_vocabulary,
+)
+
 logger = getLogger(__name__)
+
+
+def action(plugin_name: str, with_client: bool = False):
+    """
+    アクション定義メソッドに使うデコレータ
+
+    """
+
+    def _action(func):
+        def wrapper(client: BaseClient, *args, **kwargs):
+            logger.debug("%s called '%s'", client.get_send_user(), plugin_name)
+            logger.debug("%s app called '%s'", client.get_type(), plugin_name)
+            if with_client:
+                func(client, *args, **kwargs)
+            else:
+                return_val = func(*args, **kwargs)
+                if isinstance(return_val, str):
+                    client.post(return_val)
+
+        return wrapper
+
+    return _action
 
 
 def split_command(command: str, maxsplit: int = 0) -> List[str]:
     """コマンドを分離する"""
 
-    return re.split(r'\s+', command.strip().strip('　'), maxsplit)
+    return re.split(r"\s+", command.strip().strip("　"), maxsplit)
 
 
-def help_message(client: BaseClient):
+@action("help")
+def help_message():
     """「hato help」を見つけたら、使い方を表示する"""
 
-    logger.debug("%s called 'hato help'", client.get_send_user())
-    logger.debug("%s app called 'hato help'", client.get_type())
-    str_help = [
-        '',
-        '使い方',
-        '```',
-        'amesh ... 東京のamesh(雨雲情報)を表示する。',
-        'amesh [text] ... 指定した地名・住所・郵便番号[text]のamesh(雨雲情報)を表示する。',
-        'amesh [緯度 (float)] [経度 (float)] ... 指定した座標([緯度 (float)], [経度 (float)])のameshを表示する。',
-        '標高 ... 東京の標高を表示する。',
-        '標高 [text] ... 指定した地名・住所・郵便番号[text]の標高を表示する。',
-        '標高 [緯度 (float)] [経度 (float)] ... 指定した座標([緯度 (float)], [経度 (float)])の標高を表示する。',
-        'eq ... 最新の地震情報を3件表示する。',
-        'text list ... パワーワード一覧を表示する。 ',
-        'text random ... パワーワードをひとつ、ランダムで表示する。 ',
-        'text show [int] ... 指定した番号[int]のパワーワードを表示する。 ',
-        'text add [text] ... パワーワードに[text]を登録する。 ',
-        'text delete [int] ... 指定した番号[int]のパワーワードを削除する。 ',
-        '>< [text] ... 文字列[text]を吹き出しで表示する。',
-        'にゃーん ... 「よしよし」と返す。',
-        'version ... バージョン情報を表示する。',
-        '',
-        '詳細はドキュメント(https://github.com/dev-hato/hato-bot/wiki)も見てくれっぽ!',
-        '```'
-    ]
-    client.post(os.linesep.join(str_help))
+    with open("commands.txt", "r") as f:
+        str_help = [
+            "",
+            "使い方",
+            "```",
+            f.read().strip(),
+            "",
+            "詳細はドキュメント(https://github.com/dev-hato/hato-bot/wiki)も見てくれっぽ!",
+            "```",
+        ]
+        return os.linesep.join(str_help)
 
 
-def default_action(client: BaseClient):
+@action("default")
+def default_action():
     """どのコマンドにもマッチしなかった"""
-    client.post(conf.DEFAULT_REPLY)
+
+    return conf.DEFAULT_REPLY
 
 
+@action("eq", with_client=True)
 def earth_quake(client: BaseClient):
     """地震 地震情報を取得する"""
 
-    msg = "地震情報を取得できなかったっぽ!"
-    data = get_quake_list()
-    if data is not None:
-        msg = "地震情報を取得したっぽ!\n"
-        msg = msg + generate_quake_info_for_slack(data, 3)
+    msg: str = "地震情報を取得できなかったっぽ!"
+    data = get_quake_list(3)
 
+    if data is None:
+        client.post(msg)
+        return
+
+    msg = "地震情報を取得したっぽ!\n"
+    msg += "```\n"
+    msg += "出典: https://www.p2pquake.net/json_api_v2/ \n"
+    msg += "気象庁HP: https://www.jma.go.jp/jp/quake/\n"
+    msg += "```"
     client.post(msg)
 
+    for row in data:
+        time = row["earthquake"]["time"]
+        hypocenter = row["earthquake"]["hypocenter"]["name"]
+        magnitude = row["earthquake"]["hypocenter"]["magnitude"]
+        earthquake_intensity = row["earthquake"]["maxScale"]
 
-def get_text_list(client: BaseClient):
+        # 震源情報が存在しない場合は-1になる
+        # https://www.p2pquake.net/json_api_v2/#/P2P%E5%9C%B0%E9%9C%87%E6%83%85%E5%A0%B1%20API/get_history
+        if earthquake_intensity == -1:
+            earthquake_intensity = ""
+        else:
+            earthquake_intensity /= 10
+            earthquake_intensity = str(earthquake_intensity)
+
+        msg = "```\n"
+        msg += f"発生時刻: {time}\n"
+        msg += f"震源地: {hypocenter}\n"
+        msg += f"マグニチュード: {magnitude}\n"
+        msg += f"最大震度: {earthquake_intensity}\n"
+        msg += "```"
+        client.post(msg)
+
+        lat = row["earthquake"]["hypocenter"]["latitude"]
+        lng = row["earthquake"]["hypocenter"]["longitude"]
+
+        # 震源情報が存在しない場合は-200になる
+        # https://www.p2pquake.net/json_api_v2/#/P2P%E5%9C%B0%E9%9C%87%E6%83%85%E5%A0%B1%20API/get_history
+        if -200 < lat and -200 < lng:
+            map_img = generate_map_img(
+                lat=float(lat),
+                lng=float(lng),
+                zoom=10,
+                around_tiles=2,
+                time=time,
+                hypocenter=hypocenter,
+                magnitude=magnitude,
+                earthquake_intensity=earthquake_intensity,
+            )
+            with NamedTemporaryFile() as map_file:
+                map_img.save(map_file, format="PNG")
+
+                filename = ["map"]
+                ext = imghdr.what(map_file.name)
+
+                if ext:
+                    filename.append(ext)
+
+                client.upload(
+                    file=map_file.name, filename=os.path.extsep.join(filename)
+                )
+
+
+@action("textlint")
+def textlint(text: str):
+    """文章を校正する"""
+
+    msg = "完璧な文章っぽ!"
+    res = get_textlint_result(text)
+
+    if res:
+        msg = "文章の修正点をリストアップしたっぽ!\n" + res
+
+    return msg
+
+
+@action("text list")
+def get_text_list():
     """パワーワードのリストを表示"""
 
-    user = client.get_send_user_name()
-    logger.debug("%s called 'text list'", user)
-    msg = get_vocabularys()
-
-    client.post(msg)
+    return get_vocabularys()
 
 
+@action("text add")
 def add_text(word: str):
     """パワーワードの追加"""
 
-    def ret(client: BaseClient):
-        add_vocabulary(word)
-        user = client.get_send_user_name()
-        logger.debug("%s called 'text add'", user)
-        client.post('覚えたっぽ!')
-
-    return ret
+    add_vocabulary(word)
+    return "覚えたっぽ!"
 
 
+@action("text show")
 def show_text(power_word_id: str):
     """指定した番号のパワーワードを表示する"""
 
-    def ret(client: BaseClient):
-        user = client.get_send_user_name()
-        logger.debug("%s called 'text show'", user)
-        msg = show_vocabulary(int(power_word_id))
-        client.post(msg)
-    return ret
+    return show_vocabulary(int(power_word_id))
 
 
-def show_random_text(client: BaseClient):
+@action("text random")
+def show_random_text():
     """パワーワードの一覧からランダムで1つを表示する"""
-    user = client.get_send_user_name()
-    logger.debug("%s called 'text random'", user)
-    msg = show_random_vocabulary()
-    client.post(msg)
+
+    return show_random_vocabulary()
 
 
+@action("text delete")
 def delete_text(power_word_id: str):
     """指定した番号のパワーワードを削除する"""
 
-    def ret(client: BaseClient):
-        user = client.get_send_user_name()
-        logger.debug("%s called 'text delete'", user)
-        msg = delete_vocabulary(int(power_word_id))
-        client.post(msg)
-    return ret
+    return delete_vocabulary(int(power_word_id))
 
 
+@action("><")
 def totuzensi(message: str):
     """「hato >< 文字列」を見つけたら、文字列を突然の死で装飾する"""
 
-    def ret(client: BaseClient):
-        user = client.get_send_user_name()
-        word = hato_ha_karaage(message)
-        logger.debug("%s called 'hato >< %s'", user, word)
-        msg = generator(word)
-        client.post('```' + msg + '```')
-    return ret
+    word = hato_ha_karaage(message)
+    msg = generator(word)
+    return "```\n" + msg + "\n```"
 
 
-def amesh(place: str):
+@action("amesh", with_client=True)
+def amesh(client: BaseClient, place: str):
     """天気を表示する"""
 
-    def ret(client: BaseClient):
-        user = client.get_send_user_name()
-        logger.debug("%s called 'hato amesh '", user)
-        msg: str = '雨雲状況をお知らせするっぽ！'
-        lat = None
-        lon = None
-        place_list = split_command(place, 2)
+    msg: str = "雨雲状況をお知らせするっぽ！"
+    lat = None
+    lon = None
+    place_list = split_command(place, 2)
 
-        if len(place_list) == 2:
-            lat, lon = place_list
-        else:
-            geo_data = get_geo_data(place_list[0] or '東京')
-            if geo_data is not None:
-                msg = geo_data['place'] + 'の' + msg
-                lat = geo_data['lat']
-                lon = geo_data['lon']
+    if len(place_list) == 2:
+        lat, lon = place_list
+    else:
+        geo_data = get_geo_data(place_list[0] or "東京")
+        if geo_data is not None:
+            msg = geo_data["place"] + "の" + msg
+            lat = geo_data["lat"]
+            lon = geo_data["lon"]
 
-        if lat is None or lon is None:
-            client.post('座標を特定できなかったっぽ......')
-            return None
+    if lat is None or lon is None:
+        client.post("座標を特定できなかったっぽ......")
+        return
 
-        client.post(msg)
-        amesh_img = jma_amesh(lat=float(lat), lng=float(lon), zoom=10,
-                              around_tiles=2)
-        if amesh_img is None:
-            client.post('雨雲状況を取得できなかったっぽ......')
-            return None
+    client.post(msg)
+    amesh_img = jma_amesh(lat=float(lat), lng=float(lon), zoom=10, around_tiles=2)
+    if amesh_img is None:
+        client.post("雨雲状況を取得できなかったっぽ......")
+        return
 
-        with NamedTemporaryFile() as weather_map_file:
-            amesh_img.save(weather_map_file, format='PNG')
+    with NamedTemporaryFile() as weather_map_file:
+        amesh_img.save(weather_map_file, format="PNG")
 
-            filename = ['amesh']
-            ext = imghdr.what(weather_map_file.name)
+        filename = ["amesh"]
+        ext = imghdr.what(weather_map_file.name)
 
-            if ext:
-                filename.append(ext)
+        if ext:
+            filename.append(ext)
 
-            client.upload(file=weather_map_file.name,
-                          filename=os.path.extsep.join(filename))
-            return True
-
-        return None
-
-    return ret
+        client.upload(
+            file=weather_map_file.name, filename=os.path.extsep.join(filename)
+        )
 
 
+@action("amedas", with_client=True)
+def amedas(client: BaseClient, place: str):
+    """気象情報を表示する"""
+
+    lat: Optional[float] = None
+    lon: Optional[float] = None
+    place_list = split_command(place, 2)
+
+    if len(place_list) == 2:
+        lat = float(place_list[0])
+        lon = float(place_list[1])
+    else:
+        geo_data = get_geo_data(place_list[0] or "東京")
+        if geo_data is not None:
+            lat = float(geo_data["lat"])
+            lon = float(geo_data["lon"])
+
+    if lat is None or lon is None:
+        client.post("座標を特定できなかったっぽ......")
+        return
+
+    amedas_data = get_jma_amedas(lat, lon)
+
+    if amedas_data is None:
+        client.post("気象状況を取得できなかったっぽ......")
+        return
+
+    res = [f"{amedas_data['datetime']}現在の{amedas_data['place']}の気象状況をお知らせするっぽ！", "```"]
+
+    if "temp" in amedas_data:
+        res.append(f"気温: {amedas_data['temp'][0]}℃")
+
+    if "precipitation1h" in amedas_data:
+        res.append(f"降水量 (前1時間): {amedas_data['precipitation1h'][0]}mm")
+
+    if "windDirectionJP" in amedas_data:
+        res.append(f"風向: {amedas_data['windDirectionJP']}")
+
+    if "wind" in amedas_data:
+        res.append(f"風速: {amedas_data['wind'][0]}m/s")
+
+    if "sun1h" in amedas_data:
+        res.append(f"日照時間 (前1時間): {amedas_data['sun1h'][0]}時間")
+
+    if "humidity" in amedas_data:
+        res.append(f"湿度: {amedas_data['humidity'][0]}%")
+
+    if "normalPressure" in amedas_data:
+        res.append(f"海面気圧: {amedas_data['normalPressure'][0]}hPa")
+
+    res.append("```")
+    client.post(os.linesep.join(res))
+
+
+@action("電力", with_client=True)
+def electricity_demand(client: BaseClient):
+    """東京電力管内の電力使用率を表示する"""
+    url = "https://www.tepco.co.jp/forecast/html/images/juyo-d-j.csv"
+    res = requests.get(url)
+
+    if res.status_code != 200:
+        client.post("東京電力管内の電力使用率を取得できなかったっぽ......")
+        return
+
+    res_io = pd.io.stata.BytesIO(res.content)
+    df_base = pd.read_csv(res_io, encoding="shift_jis", skiprows=12, index_col="TIME")
+    df_percent = df_base[:24]["使用率(%)"].dropna().astype(int)
+    latest_data = df_percent[df_percent > 0]
+    client.post(
+        f"東京電力管内の電力使用率をお知らせするっぽ！\n" f"{latest_data.index[-1]}時点 {latest_data[-1]}%"
+    )
+    df_percent.plot()
+
+    plt.ylim(0, 100)
+    plt.grid()
+
+    with NamedTemporaryFile() as graph_file:
+        ext = "png"
+        plt.savefig(graph_file.name, format=ext)
+        client.upload(
+            file=graph_file.name,
+            filename=os.path.extsep.join(["tepco_electricity_demand_graph", ext]),
+        )
+
+    plt.close("all")
+    return
+
+
+@action("標高")
 def altitude(place: str):
     """標高を表示する"""
 
-    def ret(client: BaseClient):
-        user = client.get_send_user_name()
-        logger.debug("%s called 'hato altitude '", user)
-        coordinates = None
-        place_name = None
-        place_list = split_command(place, 2)
+    coordinates = None
+    place_name = None
+    place_list = split_command(place, 2)
 
-        if len(place_list) == 2:
-            try:
-                coordinates = [str(float(p)) for p in reversed(place_list)]
-            except ValueError:
-                client.post('引数が正しくないっぽ......')
-                return None
+    if len(place_list) == 2:
+        try:
+            coordinates = [str(float(p)) for p in reversed(place_list)]
+        except ValueError:
+            return "引数が正しくないっぽ......"
 
-            place_name = ', '.join(reversed(coordinates))
-        else:
-            geo_data = get_geo_data(place_list[0] or '東京')
-            if geo_data is not None:
-                coordinates = [geo_data['lon'], geo_data['lat']]
-                place_name = geo_data['place']
+        place_name = ", ".join(reversed(coordinates))
+    else:
+        geo_data = get_geo_data(place_list[0] or "東京")
+        if geo_data is not None:
+            coordinates = [geo_data["lon"], geo_data["lat"]]
+            place_name = geo_data["place"]
 
-        if coordinates is None:
-            client.post('座標を特定できなかったっぽ......')
-            return None
+    if coordinates is None:
+        return "座標を特定できなかったっぽ......"
 
-        res = requests.get('https://map.yahooapis.jp/alt/V1/getAltitude',
-                           {
-                               'appid': conf.YAHOO_API_TOKEN,
-                               'coordinates': ','.join(coordinates),
-                               'output': 'json'
-                           },
-                           stream=True)
+    res = requests.get(
+        "https://map.yahooapis.jp/alt/V1/getAltitude",
+        {
+            "appid": conf.YAHOO_API_TOKEN,
+            "coordinates": ",".join(coordinates),
+            "output": "json",
+        },
+        stream=True,
+    )
 
-        if res.status_code == 200:
-            data_list = json.loads(res.content)
-            if 'Feature' in data_list:
-                for data in data_list['Feature']:
-                    if 'Property' in data and 'Altitude' in data['Property']:
-                        altitude_ = data['Property']['Altitude']
-                        altitude_str = f'{altitude_:,}'
-                        client.post(f'{place_name}の標高は{altitude_str}mっぽ！')
-                        return res
+    if res.status_code == 200:
+        data_list = json.loads(res.content)
+        if "Feature" in data_list:
+            for data in data_list["Feature"]:
+                if "Property" in data and "Altitude" in data["Property"]:
+                    altitude_ = data["Property"]["Altitude"]
+                    altitude_str = f"{altitude_:,}"
+                    return f"{place_name}の標高は{altitude_str}mっぽ！"
 
-        client.post('標高を取得できなかったっぽ......')
-        return None
-
-    return ret
+    return "標高を取得できなかったっぽ......"
 
 
-def version(client: BaseClient):
+@action("version")
+def version():
     """versionを表示する"""
 
-    user = client.get_send_user_name()
-    logger.debug("%s called 'hato version'", user)
-    str_ver = "バージョン情報\n```" \
-              f"Version {conf.VERSION}"
+    str_ver = "バージョン情報\n```\n" f"Version {conf.VERSION}"
 
     if conf.GIT_COMMIT_HASH:
         str_ver += f" (Commit {conf.GIT_COMMIT_HASH[:7]})"
@@ -261,15 +411,90 @@ def version(client: BaseClient):
         except (InvalidGitRepositoryError, GitCommandNotFound):
             pass
 
-    str_ver += "\n" \
-               "Copyright (C) 2022 hato-bot Development team\n" \
-               "https://github.com/dev-hato/hato-bot ```"
-    client.post(str_ver)
+    str_ver += (
+        "\n"
+        "Copyright (C) 2022 hato-bot Development team\n"
+        "https://github.com/dev-hato/hato-bot\n```"
+    )
+    return str_ver
 
 
-def yoshiyoshi(client: BaseClient):
+@action("にゃーん")
+def yoshiyoshi():
     """「にゃーん」を見つけたら、「よしよし」と返す"""
+    return "よしよし"
 
-    logger.debug("%s called 'hato yoshiyoshi'", client.get_send_user())
-    logger.debug("%s app called 'hato yoshiyoshi'", client.get_type())
-    client.post('よしよし')
+
+# 以下おみくじの設定
+# Refer: dev-hato/hato-bot#876
+class OmikujiEnum(Enum):
+    """
+    おみくじの結果一覧
+    """
+
+    DAI_KICHI = auto()
+    CHU_KICHI = auto()
+    SHO_KICHI = auto()
+    KICHI = auto()
+    SUE_KICHI = auto()
+    AGE_KICHI = auto()
+    KYO = auto()
+    DAI_KYO = auto()
+
+
+omikuji_results = OmikujiResults(
+    {
+        OmikujiEnum.DAI_KICHI: OmikujiResult(12, ":tada: 大吉 何でもうまくいく!!気がする!!"),
+        OmikujiEnum.KICHI: OmikujiResult(100, ":smirk: 吉 まあうまくいくかも!?"),
+        OmikujiEnum.CHU_KICHI: OmikujiResult(100, ":smile: 中吉 そこそこうまくいくかも!?"),
+        OmikujiEnum.SHO_KICHI: OmikujiResult(100, ":smiley: 小吉 なんとなくうまくいくかも!?"),
+        OmikujiEnum.SUE_KICHI: OmikujiResult(
+            37, ":expressionless: 末吉 まあ多分うまくいくかもね……!?"
+        ),
+        OmikujiEnum.AGE_KICHI: OmikujiResult(2, ":poultry_leg: 揚げ吉 鳩を揚げると良いことあるよ!!"),
+        OmikujiEnum.KYO: OmikujiResult(12, ":cry: 凶 ちょっと慎重にいったほうがいいかも……"),
+        OmikujiEnum.DAI_KYO: OmikujiResult(
+            2, ":crying_cat_face: 大凶 そういう時もあります……猫になって耐えましょう"
+        ),
+    }
+)
+
+
+@action("おみくじ")
+def omikuji():
+    """
+    おみくじ結果を返す
+    """
+
+    return omikuji_draw(omikuji_results)[1].message
+
+
+@action("chat")
+def chat(message: str):
+    """
+    chat-gptに聞く
+    """
+
+    return chat_gpt(message=message)
+
+
+@action("画像生成", with_client=True)
+def image_generate(client: BaseClient, message: str):
+    """
+    画像生成を行う
+    """
+
+    url = image_create(message=message)
+
+    if url is None:
+        return "画像を生成できなかったっぽ......"
+
+    """
+    urlから画像ファイルをダウンロードして、画像を返す
+    """
+    with NamedTemporaryFile() as generated_file:
+        generated_file.write(requests.get(url).content)
+        client.upload(
+            file=generated_file.name,
+            filename="image.png",
+        )

@@ -1,10 +1,8 @@
-# 鳩bot - 愛嬌のあるSlack Bot
+# 鳩bot - 愛嬌のあるBot
 
 ![badge](https://github.com/dev-hato/hato-bot/workflows/pr-test/badge.svg)
-  
-[![Deploy](https://www.herokucdn.com/deploy/button.svg)](https://heroku.com/deploy)
 
-鳩botでは主に以下のことができます。
+鳩botでは主に次のことができます。
 
 - 雨雲情報 ... `amesh [text]` で指定した地名・住所[text]の雨雲情報を画像で表示します。
 - 最新の地震情報 ... `eq` で最新の地震情報を3件表示します。
@@ -15,32 +13,24 @@
 
 ## 鳩botを動かす
 
-鳩botを動かす方法は主に2種類あります。  
-簡単でおすすめなHerokuで動かす方法と自分のPC上で動かす方法です。
+鳩botは自分のPC上で動かすことができます。
 
 ### 必要なもの
 
 鳩botを使うには以下が必要です。
 
-- Herokuアカウント(またはDockerが動作するPC)
+- Dockerが動作するPC
 - Slack API Token ([Slack API Tokenの取得手順](./doc/01_Get_Slack_API_Token.md))
 - Yahoo API Token ([Yahoo API Tokenの取得手順](./doc/02_Get_Yahoo_API_Token.md))
-
-### Herokuで動かす
-
-すぐに鳩botを動かしたい場合はHerokuを使うと簡単です。
-
-1. Slack API TokenとYahoo API Tokenを取得する。
-1. [Herokuへデプロイする。](./doc/03_Deploy_to_Heroku.md)
-1. [Slack Event URLを設定する。](./doc/04_Setting_to_Event_URL.md)
 
 ### 自分のPC上で動かす
 
 自分のPCで動かすこともできます。
 
 1. 事前にSlack API TokenとYahoo API Tokenを取得します。
+2. hadolintをインストールします。
 
-1. このリポジトリをcloneします。
+3. このリポジトリをcloneします。
 
     安定版を使う場合は `-b master` を指定します。最新の開発版を使う場合は指定不要です。
 
@@ -51,32 +41,60 @@
 
     または [Release](https://github.com/dev-hato/hato-bot/releases/latest) から最新の安定版をダウンロードして解凍します。
 
-1. [Pipenv](https://pipenv-ja.readthedocs.io/ja/translate-ja/)で仮想環境を作成します。
+4. 必要に応じてパッケージをインストールします。
 
     ```sh
     pipenv install
+    npm install
     ```
 
-1. `.env` ファイルを作成し  Slack API Token、PostgreSQLの認証情報、Yahoo API Tokenなどを記述します。
+5. `.env` ファイルを作成し  Slack API Token、PostgreSQLの認証情報、Yahoo API Tokenなどを記述します。
 
     `.env.example` をコピーして使うとよいでしょう
 
-1. docker-composeで鳩botとPostgreSQLを起動します。
+    MODEに `discord` を指定すると、DiscordのBotとして動作します。
+
+    DISCORD_API_TOKENにDiscordのBot Tokenを指定します。
+
+    DISCORD_API_TOKENには `Read Messages/View Channels` と、 `Send Messages` の権限が必要です。
+
+    MODEに `misskey` を指定すると、自分のサーバーからのメンションに限って反応するMisskeyのBotとして動作します。
+
+    MISSKEY_URLにBotのいるMisskeyサーバーのドメインを指定します。
+
+    MISSKEY_API_TOKENにMisskeyのBotのアクセストークンを指定します。
+
+    MISSKEY_API_TOKENには `ドライブを操作する` と、 `ノートを作成・削除する` の権限が必要です。
+
+6. docker composeで鳩botとPostgreSQLを起動します。
 
     ```sh
-    cd ./setup
     export TAG_NAME=$(git symbolic-ref --short HEAD | sed -e "s:/:-:g")
-    docker-compose up -d
-    cd ..
+    docker compose up -d --wait
     ```
 
-1. コードの変更はdocker-composeの再起動で適用できます。
+    開発時は代わりに次のコマンドを実行します。
 
     ```sh
-    cd ./setup
     export TAG_NAME=$(git symbolic-ref --short HEAD | sed -e "s:/:-:g")
-    docker-compose restart
+    docker compose -f docker-compose.yml -f dev.base.docker-compose.yml -f dev.docker-compose.yml build
+    docker compose -f docker-compose.yml -f dev.base.docker-compose.yml -f dev.docker-compose.yml watch
     ```
+
+7. コードの変更はdocker composeの再起動で適用できます。
+
+    ```sh
+    export TAG_NAME=$(git symbolic-ref --short HEAD | sed -e "s:/:-:g")
+    docker compose restart
+    ```
+
+   開発時は自動的にDockerイメージの再ビルドが行われ反映されます。
+
+#### lintをかける方法
+
+```sh
+npm run lint
+```
 
 #### コマンドの実行方法
 
@@ -96,8 +114,12 @@
 
 #### コミットする前に行うこと
 
-<https://pre-commit.com/> の手順に従って `pre-commit` をインストールします。  
-これにより、[.pre-commit-config.yaml](.pre-commit-config.yaml)の設定に基づいて、コミット時にクレデンシャルが含まれていないかの検査が行われるようになります。
+開発に必要なパッケージと `pre-commit` のインストールを行います。
+
+```sh
+pipenv install --dev
+pipenv run pre-commit install
+```
 
 #### 補足
 
@@ -108,13 +130,18 @@
 - 鳩botで使用可能なコマンドは次の通りです。
 
     ```text
-    amesh ... 東京のameshを表示する。
-    amesh [text] ... 指定した地名・住所・郵便番号[text]のameshを表示する。
-    amesh [緯度 (float)] [経度 (float)] ... 指定した座標([緯度 (float)], [経度 (float)])のameshを表示する。
+    amesh ... 東京のamesh(雨雲情報)を表示する。
+    amesh [text] ... 指定した地名・住所・郵便番号[text]のamesh(雨雲情報)を表示する。
+    amesh [緯度 (float)] [経度 (float)] ... 指定した座標([緯度 (float)], [経度 (float)])のamesh(雨雲情報)を表示する。
+    amedas ... 東京のamedas(気象情報)を表示する。
+    amedas [text] ... 指定した地名・住所・郵便番号[text]のamedas(気象情報)を表示する。
+    amedas [緯度 (float)] [経度 (float)] ... 指定した座標([緯度 (float)], [経度 (float)])のamedas(気象情報)を表示する。
+    電力 ... 東京電力管内の電力使用率を表示する。
     標高 ... 東京の標高を表示する。
     標高 [text] ... 指定した地名・住所・郵便番号[text]の標高を表示する。
     標高 [緯度 (float)] [経度 (float)] ... 指定した座標([緯度 (float)], [経度 (float)])の標高を表示する。
     eq ... 最新の地震情報を3件表示する。
+    textlint [text] ... 文字列[text]を校正する。
     text list ... パワーワード一覧を表示する。
     text random ... パワーワードをひとつ、ランダムで表示する。
     text show [int] ... 指定した番号[int]のパワーワードを表示する。
@@ -122,7 +149,10 @@
     text delete [int] ... 指定した番号[int]のパワーワードを削除する。
     >< [text] ... 文字列[text]を吹き出しで表示する。
     にゃーん ... 「よしよし」と返す。
+    おみくじ ... おみくじを引いて返す。
     version ... バージョン情報を表示する。
+    chat [text] ... ChatGPTで文章生成する。
+    画像生成 [text] ... openAIのImage generationで画像生成する。[text]は英語での入力推奨。
     ```
 
 ## バージョンアップによる変更点

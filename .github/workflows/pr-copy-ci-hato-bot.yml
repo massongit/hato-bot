@@ -1,68 +1,21 @@
 ---
 name: pr-copy-ci-hato-bot
-
 on:
   push:
     branches:
       - develop
-
+  workflow_dispatch:
 jobs:
-  # CIの差分をsudden-deathにpushする
   pr-copy-ci:
     runs-on: ubuntu-latest
-
     steps:
-      - uses: actions/checkout@v2
+      - uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1
+      - uses: actions/github-script@v7.0.1
         with:
-          fetch-depth: 0
-          path: hato-bot
-      - uses: actions/checkout@v2
-        with:
-          fetch-depth: 0
-          repository: dev-hato/sudden-death
-          path: sudden-death
-      - name: Copy CI
-        run: |
-          worklows_path=.github/workflows
-          find sudden-death/${worklows_path} -type f \
-                                             -not -name "*sudden-death.yml" \
-                                             -exec rm -f {} \;
-          DEST_PATH="sudden-death/${worklows_path}/"
-          find hato-bot/${worklows_path} -type f \
-                                         -not -name "*hato-bot.yml" \
-                                         -exec cp {} "${DEST_PATH}" \;
-          for f in .markdown-lint.yml .python-lint .python-lint .textlintrc
-          do
-            cp hato-bot/.github/linters/${f} sudden-death/.github/linters/
-          done
-          for f in .gitleaks.toml .pre-commit-config.yaml .python-version package.json yarn.lock
-          do
-            cp hato-bot/${f} sudden-death/
-          done
-          PATTERN_BEFORE="$(grep '^click' sudden-death/Pipfile)"
-          PATTERN_AFTER="$(grep '^click' hato-bot/Pipfile)"
-          PATTERN="s/${PATTERN_BEFORE}/${PATTERN_AFTER}/g"
-          sed -i -e "${PATTERN}" sudden-death/Pipfile
-      - name: Show diff
-        id: show_diff
-        working-directory: sudden-death
-        run: echo "::set-output name=diff::$(git diff)"
-      - name: Push
-        if: ${{ steps.show_diff.outputs.diff != '' }}
-        working-directory: sudden-death
-        run: |
-          git config user.name "github-actions[bot]"
-          EMAIL="41898282+github-actions[bot]@users.noreply.github.com"
-          git config user.email "${EMAIL}"
-          git add -A
-          git commit -m "鳩は唐揚げ！(hato-botのCIを反映するよ！)"
-          echo "${{secrets.SUDDEN_DEATH_CI_PRIVATE_KEY}}" > deploy_key.pem
-          chmod 600 deploy_key.pem
-          REPO_URL="git@github.com:dev-hato/sudden-death.git"
-          GITHUB_HEAD="HEAD:refs/heads/pr-copy-ci"
-          GIT_SSH_COMMAND="ssh"
-          GIT_SSH_COMMAND+=" -i deploy_key.pem"
-          GIT_SSH_COMMAND+=" -o StrictHostKeyChecking=no"
-          GIT_SSH_COMMAND+=" -F /dev/null"
-          export GIT_SSH_COMMAND
-          git push -f "${REPO_URL}" "${GITHUB_HEAD}"
+          github-token: ${{secrets.SUDDEN_DEATH_CI_TOKEN}}
+          script: |
+            const script = require(`${process.env.GITHUB_WORKSPACE}/scripts/pr_copy_ci_hato_bot/pr_copy_ci/dispatch_event.js`)
+            await script({ github, context })
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
